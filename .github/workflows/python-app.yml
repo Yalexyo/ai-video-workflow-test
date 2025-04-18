@@ -1,10 +1,11 @@
 name: Python application with LLM Bug Analysis (New Repo)
 
 on:
+  workflow_dispatch: # 允许手动触发
   push:
-    branches: [ "main", "feature/**" ] # 触发 main 和 feature 分支推送
+    branches: [ "main", "master", "feature/**" ] # 触发 main/master 和 feature 分支推送
   pull_request:
-    branches: [ "main" ] # 触发指向 main 的 PR
+    branches: [ "main", "master" ] # 触发指向 main/master 的 PR
 
 permissions:
   contents: read

@@ -1,0 +1,82 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+.env
+.venv/
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDEs and editors
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+.tmproj
+*.esproj
+*.sublime-project
+*.sublime-workspace
+!.editorconfig
+
+# macOS
+.DS_Store
+
+# Cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+logs/
+
+# Runtime data
+*.sqlite3
+*.sqlite3-journal
+
+# 数据目录
+data/output/
+data/input/*
+!data/input/examples/
+data/cache/
+
+# 编辑器配置
+.cursor/
+
+# 系统文件
+Thumbs.db
+
+# Project specific
+_input/
+analysis_results/
+testArchive/
+videoAnalysis_archived/ 

@@ -1,0 +1,291 @@
+name: Python application with LLM Bug Analysis (New Repo)
+
+on:
+  push:
+    branches: [ "main", "feature/**" ] # 触发 main 和 feature 分支推送
+  pull_request:
+    branches: [ "main" ] # 触发指向 main 的 PR
+
+permissions:
+  contents: read
+  pull-requests: write # 需要写权限来添加评论
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4 # 使用 v4 版本
+
+    - name: Set up Python 3.11
+      uses: actions/setup-python@v5 # 使用 v5 版本
+      with:
+        python-version: "3.11"
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt # 安装依赖
+
+    # Linting step (optional but good practice)
+    # - name: Lint with flake8
+    #   run: |
+    #     pip install flake8
+    #     flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
+    #     flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+
+    - name: Test with pytest and capture output
+      id: run_tests
+      continue-on-error: true # 即使测试失败也继续执行后续步骤
+      run: |
+        # 运行 tests/ 目录下的测试 (不需要指定 src/ 因为测试会导入根目录的模块)
+        # 增加 PYTHONPATH 确保能找到根目录的模块
+        export PYTHONPATH=$PYTHONPATH:$(pwd)
+        python -m pytest tests/ --verbose > test_output.txt 2>&1
+        # 使用 PIPESTATUS[0] 来获取 pytest 的退出码，即使重定向了输出
+        echo "tests_exit_code=${PIPESTATUS[0]}" >> $GITHUB_OUTPUT
+
+        if [ ${PIPESTATUS[0]} -ne 0 ]; then
+          echo "::group::Test Failure Details"
+          cat test_output.txt
+          echo "::endgroup::"
+
+          # 保存测试输出
+          echo "test_output<<EOF" >> $GITHUB_OUTPUT
+          cat test_output.txt >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          # 提取失败的测试信息
+          failed_test=$(grep -oE "^FAILED [^ ]+" test_output.txt | head -1 || echo "Failed test info not found")
+          echo "failed_test=$failed_test" >> $GITHUB_OUTPUT
+          echo "tests_failed=true" >> $GITHUB_OUTPUT
+        else
+          echo "tests_failed=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Extract failing test code
+      # 只在测试失败时运行
+      if: steps.run_tests.outputs.tests_failed == 'true'
+      id: extract_code
+      run: |
+        failed_test_line="${{ steps.run_tests.outputs.failed_test }}" # e.g., FAILED tests/test_example_bugs.py::TestExampleBugs::test_append_to_list_bug
+        # 提取测试文件路径
+        test_file=$(echo "$failed_test_line" | awk '{print $2}' | cut -d: -f1) # e.g., tests/test_example_bugs.py
+
+        if [ -z "$test_file" ] || [ ! -f "$test_file" ]; then
+          echo "Could not extract test file path from '$failed_test_line' or file not found."
+          echo "source_code=Could not find related source code" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        # 尝试找到对应的源文件 (去掉 test_ 前缀，查找根目录或 src/)
+        base_name=$(basename "$test_file" .py) # e.g., test_example_bugs
+
+        source_code="Could not find related source code" # Default message
+        source_file_path=""
+
+        if [[ "$base_name" == test_* ]]; then
+            impl_name="${base_name#test_}.py" # e.g., example_bugs.py
+
+            # 在根目录查找
+            if [ -f "$impl_name" ]; then
+                source_file_path="$impl_name"
+                echo "Found implementation file: $source_file_path"
+            # 可选：如果将来代码移到 src/，则在此处添加查找 src/ 的逻辑
+            # elif [ -f "src/$impl_name" ]; then
+            #    source_file_path="src/$impl_name"
+            #    echo "Found implementation file: $source_file_path"
+            else
+                echo "Implementation file '$impl_name' not found in root directory."
+                # Fallback: 尝试在根目录找名字相关的 .py 文件（不太精确）
+                # possible_impl_name="${impl_name%.py}"
+                # related_file=$(find . -maxdepth 1 -name "*.py" -not -path '*/test_*.py' -exec grep -l "$possible_impl_name" {} + | head -n 1)
+                # if [ -f "$related_file" ]; then
+                #     source_file_path="$related_file"
+                #     echo "Found related file: $source_file_path"
+                # fi
+            fi
+        else
+            echo "Test filename '$base_name' does not follow 'test_*' convention."
+             # 如果测试文件名不规范，尝试直接用测试文件名（去掉路径）找同名源文件
+            plain_base_name=$(basename "$test_file")
+            if [ -f "$plain_base_name" ]; then
+               source_file_path="$plain_base_name"
+               echo "Found source file with same name as test file (excluding path): $source_file_path"
+            fi
+        fi
+
+        # 如果找到了源文件路径，读取内容
+        if [ -n "$source_file_path" ] && [ -f "$source_file_path" ]; then
+             source_code=$(cat "$source_file_path")
+             echo "source_file=$source_file_path" >> $GITHUB_OUTPUT
+        else
+             echo "Source file path not determined or file does not exist."
+             echo "source_file=unknown" >> $GITHUB_OUTPUT
+        fi
+
+        # 输出源代码内容
+        echo "source_code<<EOF" >> $GITHUB_OUTPUT
+        echo "$source_code" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+
+    - name: Analyze with Open Router LLM
+      # 只在测试失败且找到源代码时运行
+      if: steps.run_tests.outputs.tests_failed == 'true' && steps.extract_code.outputs.source_code != 'Could not find related source code'
+      id: llm_analysis
+      env:
+        # 确保在仓库 Settings -> Secrets -> Actions 中设置了此密钥
+        OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+      run: |
+        # 创建调用 OpenRouter 的 Python 脚本
+        cat > call_openrouter.py << 'EOF'
+        import os
+        import sys
+        import json
+        import requests
+
+        api_key = os.environ.get("OPENROUTER_API_KEY")
+        if not api_key:
+            print(json.dumps({"error": "Open Router API key (OPENROUTER_API_KEY) is not set in GitHub Secrets."}))
+            sys.exit(1)
+
+        # 从环境变量或参数获取输入
+        test_output = os.environ.get("TEST_OUTPUT")
+        source_code = os.environ.get("SOURCE_CODE")
+        source_file = os.environ.get("SOURCE_FILE")
+
+        if not all([test_output, source_code, source_file]):
+             print(json.dumps({"error": "Missing input data (TEST_OUTPUT, SOURCE_CODE, or SOURCE_FILE)."}))
+             sys.exit(1)
+
+        prompt = f"""
+        A Python test failed in my project. Please analyze the following test output and the related source code to suggest a fix.
+
+        ## Test Output
+        ```
+        {test_output}
+        ```
+
+        ## Related Source Code File ({source_file})
+        ```python
+        {source_code}
+        ```
+
+        Please provide:
+        1. An analysis of the root cause of the test failure.
+        2. Specific suggestions for fixing the code, including the corrected code snippet.
+        3. An explanation of how the fix addresses the problem.
+
+        Format the response in Markdown.
+        """
+
+        url = "https://openrouter.ai/api/v1/chat/completions"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            "HTTP-Referer": "https://github.com/YOUR_USERNAME/YOUR_REPO_NAME", # Replace with your details or keep generic
+            "X-Title": "GitHub Actions LLM Bug Analyzer"
+        }
+        payload = {
+            "model": "anthropic/claude-3-haiku-20240307", # Using Haiku for speed/cost
+            "messages": [
+                {"role": "system", "content": "You are an expert Python programmer specializing in debugging and fixing code based on failing tests. Provide clear, concise, and accurate analysis and solutions."},
+                {"role": "user", "content": prompt}
+            ],
+            "temperature": 0.3,
+            "max_tokens": 1500
+        }
+
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=120) # Added timeout
+            response.raise_for_status() # Raise HTTPError for bad responses (4xx or 5xx)
+
+            result = response.json()
+            if "choices" in result and len(result["choices"]) > 0 and "message" in result["choices"][0] and "content" in result["choices"][0]["message"]:
+               suggestion = result["choices"][0]["message"]["content"]
+               print(json.dumps({"suggestion": suggestion}))
+            else:
+               print(json.dumps({"error": f"Unexpected response format from OpenRouter: {result}"}))
+
+        except requests.exceptions.RequestException as e:
+            print(json.dumps({"error": f"Error calling OpenRouter API: {e}"}))
+        except Exception as e:
+            print(json.dumps({"error": f"An unexpected error occurred: {e}"}))
+
+        EOF
+
+        # 执行脚本，将上下文作为环境变量传递
+        export TEST_OUTPUT="${{ steps.run_tests.outputs.test_output }}"
+        export SOURCE_CODE="${{ steps.extract_code.outputs.source_code }}"
+        export SOURCE_FILE="${{ steps.extract_code.outputs.source_file }}"
+        python_output=$(python call_openrouter.py)
+
+        # 检查 python_output 是否为空或表示错误
+        if [ -z "$python_output" ]; then
+          python_output=$(json.dumps({"error": "Python script produced no output."}))
+        fi
+
+        # 保存 LLM 输出
+        echo "llm_output<<EOF" >> $GITHUB_OUTPUT
+        echo "$python_output" >> $GITHUB_OUTPUT
+        echo "EOF" >> $GITHUB_OUTPUT
+
+    - name: Add PR comment with fix suggestion
+      # 只在测试失败、LLM 分析成功且在 PR 上下文运行时运行
+      if: steps.run_tests.outputs.tests_failed == 'true' && steps.llm_analysis.outputs.llm_output != '' && github.event_name == 'pull_request'
+      uses: actions/github-script@v7 # 使用 v7 版本
+      with:
+        github-token: ${{ secrets.GITHUB_TOKEN }} # 使用默认的 GITHUB_TOKEN
+        script: |
+          const llmOutputJson = `${{ steps.llm_analysis.outputs.llm_output }}`;
+          let llmOutput;
+          try {
+            llmOutput = JSON.parse(llmOutputJson);
+          } catch (e) {
+            console.error("Error parsing LLM output:", e);
+            console.error("Raw LLM output:", llmOutputJson);
+            // Optionally add a comment indicating the parsing error
+            github.rest.issues.createComment({
+               owner: context.repo.owner,
+               repo: context.repo.repo,
+               issue_number: context.issue.number,
+               body: `## 🤖 AI Analysis Error\n\nFailed to parse the response from the LLM analysis step. Please check the workflow logs.`
+            });
+            return; // Stop execution for this step
+          }
+
+          // 检查 LLM 输出中是否有错误字段
+          if (llmOutput.error) {
+            console.log(`LLM analysis step reported an error: ${llmOutput.error}`);
+            // 添加包含错误的评论
+            github.rest.issues.createComment({
+               owner: context.repo.owner,
+               repo: context.repo.repo,
+               issue_number: context.issue.number,
+               body: `## 🤖 AI Analysis Error\n\nThe LLM analysis step failed with the following error:\n\`\`\`\n${llmOutput.error}\n\`\`\`\nPlease check the workflow logs and ensure the OPENROUTER_API_KEY secret is correctly configured.`
+            });
+            return; // Stop execution for this step
+          }
+
+          // 如果没有错误，提取建议并创建评论
+          const suggestion = llmOutput.suggestion || "No suggestion provided."; // Fallback if suggestion is missing
+          const sourceFile = `${{ steps.extract_code.outputs.source_file }}` || "unknown file"; // Fallback
+
+          const body = `## 🤖 AI Test Failure Analysis & Fix Suggestion\n\nI detected a test failure related to \`${sourceFile}\` and performed an analysis. Here's the suggestion:\n\n${suggestion}\n\n---\n⚠️ **Note**: This is an AI-generated suggestion. Please review it carefully before applying.`;
+
+          // 创建评论
+          try {
+             await github.rest.issues.createComment({
+               owner: context.repo.owner,
+               repo: context.repo.repo,
+               // context.issue.number 只在 PR 事件中有效
+               issue_number: context.issue.number,
+               body: body
+             });
+          } catch (error) {
+             console.error(`Error creating PR comment: ${error}`);
+             // Maybe the issue number wasn't available (e.g., run on push, not PR)
+             console.log('Could not create PR comment. This might be expected if the workflow was not triggered by a pull request.');
+          } 

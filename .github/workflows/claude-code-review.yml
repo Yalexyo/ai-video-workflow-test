@@ -2,7 +2,7 @@ name: Claude Opus Code Review
 
 on:
   pull_request:
-    branches: [ main, master, develop ]
+    branches: [ main ]
     paths:
       - 'src/core/**'
 
@@ -63,7 +63,7 @@ jobs:
                   headers = {
                       "Authorization": f"Bearer {OPENROUTER_API_KEY}",
                       "Content-Type": "application/json",
-                      "HTTP-Referer": "https://github.com/Yalexyo/AI-Video2.0"
+                      "HTTP-Referer": "https://github.com/Yalexyo/ai-video-workflow-test"
                   }
                   
                   data = {
@@ -77,7 +77,7 @@ jobs:
                   all_annotations.append(f"## {file_path}\n{annotation}")
               
               with open('ai_annotations.json', 'w') as f:
-                  json.dump({"comment": "\\n".join(all_annotations)}, f)
+                  json.dump({"comment": "\n".join(all_annotations)}, f)
           
           if __name__ == "__main__":
               analyze_core_code()

@@ -1,0 +1,104 @@
+name: Claude Opus Code Review
+
+on:
+  pull_request:
+    branches: [ main, master, develop ]
+    paths:
+      - 'src/core/**'
+
+jobs:
+  ai-code-review:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.9'
+      
+      - name: Install dependencies
+        run: pip install requests
+      
+      - name: Identify changed core files
+        id: changed-files
+        run: |
+          PR_BASE_SHA=${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA=${{ github.event.pull_request.head.sha }}
+          echo "CORE_FILES=$(git diff --name-only $PR_BASE_SHA $PR_HEAD_SHA | grep -E '^src/core/' | xargs)" >> $GITHUB_ENV
+      
+      - name: Create review script
+        if: env.CORE_FILES != ''
+        run: |
+          mkdir -p .github/scripts
+          cat > .github/scripts/claude_review.py << 'EOF'
+          import os
+          import json
+          import requests
+          
+          OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')
+          API_URL = "https://openrouter.ai/api/v1/chat/completions"
+          
+          def analyze_core_code():
+              core_files = os.getenv('CORE_FILES', '').split()
+              all_annotations = []
+              
+              for file_path in core_files:
+                  with open(file_path, 'r') as f:
+                      content = f.read()
+                  
+                  prompt = f"""
+                  作为视频分析应用的核心代码审查专家，请分析以下文件：
+                  {file_path}
+                  
+                  代码内容：
+                  {content}
+                  
+                  请检查：性能瓶颈、潜在错误、安全漏洞、优化机会，并提供具体行号和建议。
+                  """
+                  
+                  headers = {
+                      "Authorization": f"Bearer {OPENROUTER_API_KEY}",
+                      "Content-Type": "application/json",
+                      "HTTP-Referer": "https://github.com/Yalexyo/AI-Video2.0"
+                  }
+                  
+                  data = {
+                      "model": "anthropic/claude-3-opus",
+                      "messages": [{"role": "user", "content": prompt}]
+                  }
+                  
+                  response = requests.post(API_URL, headers=headers, json=data)
+                  analysis = response.json()
+                  annotation = analysis['choices'][0]['message']['content']
+                  all_annotations.append(f"## {file_path}\n{annotation}")
+              
+              with open('ai_annotations.json', 'w') as f:
+                  json.dump({"comment": "\\n".join(all_annotations)}, f)
+          
+          if __name__ == "__main__":
+              analyze_core_code()
+          EOF
+      
+      - name: Run AI review
+        if: env.CORE_FILES != ''
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: python .github/scripts/claude_review.py
+      
+      - name: Post comment
+        if: env.CORE_FILES != ''
+        uses: actions/github-script@v6
+        with:
+          script: |
+            const fs = require('fs');
+            const results = JSON.parse(fs.readFileSync('ai_annotations.json'));
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: results.comment
+            });
